@@ -1,4 +1,4 @@
-# Core Bot Framework - CORRECT VERSIONS
+# Core Bot Framework
 pyrogram==2.0.106
 tgcrypto==1.2.5
 
@@ -25,9 +25,6 @@ redis==5.0.4
 pydub==0.25.1
 ffmpeg-python==0.2.0
 
-# Image Processing
-Pillow==10.3.0
-
 # Cloud Services
 cloudflare==2.20.0
 
@@ -35,6 +32,7 @@ cloudflare==2.20.0
 python-dotenv==1.0.1
 requests==2.31.0
 loguru==0.7.2
+python-magic==0.4.27
 
 # Lyrics
 lyricsgenius==3.0.1
@@ -47,3 +45,6 @@ ratelimit==2.2.1
 
 # Scheduling
 APScheduler==3.10.4
+
+# Image Processing (Alternative to Pillow)
+opencv-python-headless==4.9.0.80  # Lighter version without GUI
