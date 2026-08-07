@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Telegram Music Bot - Pyrogram 2.0.106 Compatible
+Telegram Music Bot - Single File Version
+No module import errors!
 """
 
 import os
@@ -8,31 +9,23 @@ import sys
 import asyncio
 import logging
 from pathlib import Path
+import threading
 
-# Pyrogram imports - Correct for v2.0.106
+# Pyrogram imports
 from pyrogram import Client, filters
 from pyrogram.types import (
     Message,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    CallbackQuery,
-    ReplyKeyboardMarkup,
-    KeyboardButton
+    CallbackQuery
 )
 from pyrogram.enums import ParseMode, ChatAction
-from pyrogram.errors import (
-    FloodWait,
-    MessageNotModified,
-    QueryIdInvalid,
-    UserIsBlocked
-)
-from pyrogram.handlers import MessageHandler, CallbackQueryHandler
+from pyrogram.errors import FloodWait
 
 # Flask for health checks
 from flask import Flask, jsonify
-import threading
 
-# Load environment
+# Environment variables
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -47,47 +40,112 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Flask App
-health_app = Flask(__name__)
+# ============================================
+# CONFIGURATION
+# ============================================
 
-@health_app.route('/')
-def home():
-    return """
-    <h1>🎵 Music Bot is Running!</h1>
-    <p>Status: Online ✅</p>
-    """
-
-@health_app.route('/health')
-def health():
-    return jsonify({"status": "healthy", "bot": "running"})
-
-def run_flask():
-    port = int(os.environ.get('PORT', 8080))
-    health_app.run(host='0.0.0.0', port=port, debug=False)
-
-# Configuration
 class Config:
+    """Bot Configuration"""
     API_ID = int(os.getenv("API_ID", "0"))
     API_HASH = os.getenv("API_HASH", "")
     BOT_TOKEN = os.getenv("BOT_TOKEN", "")
     OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+    APP_URL = os.getenv("APP_URL", "")
     
-    # Sticker & Effect IDs
+    # Sticker IDs (Optional)
     PREMIUM_STICKER = os.getenv("PREMIUM_STICKER_ID", "")
-    MUSIC_EFFECT = os.getenv("MUSIC_EFFECT_ID", "")
+    MUSIC_STICKER = os.getenv("MUSIC_STICKER_ID", "")
+    
+    # Effect IDs (Optional)
     PREMIUM_EFFECT = os.getenv("PREMIUM_EFFECT_ID", "")
+    MUSIC_EFFECT = os.getenv("MUSIC_EFFECT_ID", "")
 
-# Create Pyrogram Client - v2.0.106 Syntax
-app = Client(
-    "MusicBot",  # Session name
+# ============================================
+# FLASK HEALTH CHECK SERVER
+# ============================================
+
+health_app = Flask(__name__)
+
+@health_app.route('/')
+def home():
+    """Home page"""
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Music Bot</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                text-align: center;
+                padding: 50px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+            }
+            .container {
+                background: rgba(255,255,255,0.1);
+                padding: 40px;
+                border-radius: 20px;
+                max-width: 600px;
+                margin: 0 auto;
+            }
+            h1 { font-size: 3em; }
+            .status {
+                background: #00ff00;
+                color: black;
+                padding: 10px 30px;
+                border-radius: 50px;
+                display: inline-block;
+                margin: 20px 0;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🎵 Music Bot</h1>
+            <div class="status">✅ Online</div>
+            <p>Bot is running 24/7</p>
+        </div>
+    </body>
+    </html>
+    """
+
+@health_app.route('/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({
+        "status": "healthy",
+        "bot": "running",
+        "timestamp": str(asyncio.get_event_loop().time())
+    })
+
+@health_app.route('/ping')
+def ping():
+    """Ping endpoint"""
+    return "pong", 200
+
+def run_flask():
+    """Run Flask server in thread"""
+    port = int(os.environ.get('PORT', 8080))
+    health_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+# ============================================
+# PYROGRAM BOT
+# ============================================
+
+# Create bot instance
+bot = Client(
+    "MusicBotSession",
     api_id=Config.API_ID,
     api_hash=Config.API_HASH,
-    bot_token=Config.BOT_TOKEN,
-    plugins=dict(root="plugins")  # Plugins directory
+    bot_token=Config.BOT_TOKEN
 )
 
-# Command Handlers
-@app.on_message(filters.command("start") & filters.private)
+# ============================================
+# COMMAND HANDLERS
+# ============================================
+
+@bot.on_message(filters.command("start") & filters.private)
 async def start_command(client: Client, message: Message):
     """Start command"""
     user = message.from_user
@@ -105,24 +163,35 @@ async def start_command(client: Client, message: Message):
         [
             InlineKeyboardButton("📊 Stats", callback_data="stats"),
             InlineKeyboardButton("ℹ️ Help", callback_data="help")
+        ],
+        [
+            InlineKeyboardButton("💎 Get Premium", url="https://t.me/your_channel")
         ]
     ])
     
     welcome_text = f"""
-**🎵 Welcome {user.first_name}!**
+**🎵 Welcome to Premium Music Bot!**
 
-**Premium Music Bot Features:**
+**Hello {user.first_name}!**
+
+**Features:**
 • 🎵 YouTube Music Streaming
 • 🎨 Audio Effects Studio
 • ⭐ Premium Features
 • 🎯 Custom Stickers
-• 📊 Statistics
-• 🔊 HD Audio
+• 🔊 HD Audio Quality
 
-**Use buttons below!**
+**Premium Benefits:**
+• 320kbps HD Audio
+• Unlimited Downloads
+• Priority Queue
+• Ad-Free Experience
+• Exclusive Stickers
+
+Use buttons below to navigate!
     """
     
-    # Try sending with animation
+    # Try to send with animation
     try:
         if Config.PREMIUM_EFFECT:
             await message.reply_animation(
@@ -136,112 +205,198 @@ async def start_command(client: Client, message: Message):
                 reply_markup=keyboard
             )
     except Exception as e:
-        logger.error(f"Error in start: {e}")
+        logger.error(f"Welcome error: {e}")
         await message.reply_text(welcome_text, reply_markup=keyboard)
 
-@app.on_message(filters.command("play") & filters.private)
+@bot.on_message(filters.command("play") & filters.private)
 async def play_command(client: Client, message: Message):
-    """Play music"""
+    """Play music command"""
     if len(message.command) < 2:
         await message.reply_text(
-            "**⚠️ Usage:**\n`/play song name`\n\n"
-            "**Example:**\n`/play Shape of You`"
+            "**⚠️ Usage:**\n"
+            "`/play song name`\n\n"
+            "**Examples:**\n"
+            "`/play Shape of You`\n"
+            "`/play https://youtube.com/...`\n\n"
+            "Send a song name or YouTube link!"
         )
         return
     
     query = " ".join(message.command[1:])
     
-    # Show typing
-    await client.send_chat_action(message.chat.id, ChatAction.TYPING)
+    # Send processing message
+    status = await message.reply_text(
+        f"🔍 **Searching:** `{query}`\n"
+        "⏳ Please wait..."
+    )
     
-    # Create player controls
-    controls = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("⏸️ Pause", callback_data="pause"),
-            InlineKeyboardButton("▶️ Resume", callback_data="resume")
-        ],
-        [
-            InlineKeyboardButton("⏹️ Stop", callback_data="stop"),
-            InlineKeyboardButton("🔁 Loop", callback_data="loop")
-        ],
-        [
-            InlineKeyboardButton("🎨 Effects", callback_data="add_effect"),
-            InlineKeyboardButton("📝 Lyrics", callback_data="lyrics")
-        ]
-    ])
+    try:
+        # Show typing action
+        await client.send_chat_action(message.chat.id, ChatAction.TYPING)
+        
+        # Create player controls
+        controls = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("⏸️ Pause", callback_data="pause"),
+                InlineKeyboardButton("▶️ Resume", callback_data="resume")
+            ],
+            [
+                InlineKeyboardButton("⏹️ Stop", callback_data="stop"),
+                InlineKeyboardButton("🔁 Loop", callback_data="loop")
+            ],
+            [
+                InlineKeyboardButton("🎨 Effects", callback_data="add_effect"),
+                InlineKeyboardButton("📝 Lyrics", callback_data="lyrics")
+            ],
+            [
+                InlineKeyboardButton("🔊 Vol+", callback_data="vol_up"),
+                InlineKeyboardButton("🔉 Vol-", callback_data="vol_down")
+            ]
+        ])
+        
+        # Update status message
+        await status.edit_text(
+            f"**🎵 Now Playing**\n\n"
+            f"**Song:** {query[:50]}\n"
+            f"**Status:** ▶️ Playing\n"
+            f"**Quality:** 192kbps\n"
+            f"**Time:** 00:00\n\n"
+            f"Use controls below to manage playback!",
+            reply_markup=controls
+        )
+        
+    except FloodWait as e:
+        logger.warning(f"FloodWait: {e.value}s")
+        await asyncio.sleep(e.value)
+        await play_command(client, message)
+    except Exception as e:
+        logger.error(f"Play error: {e}")
+        await status.edit_text(f"❌ **Error:** {str(e)}")
+
+@bot.on_message(filters.command("search") & filters.private)
+async def search_command(client: Client, message: Message):
+    """Search music command"""
+    if len(message.command) < 2:
+        await message.reply_text(
+            "**🔍 Search Music**\n\n"
+            "Usage: `/search song name`\n"
+            "Example: `/search Shape of You`"
+        )
+        return
+    
+    query = " ".join(message.command[1:])
     
     await message.reply_text(
-        f"**🎵 Playing:** `{query}`\n\n"
-        f"**Status:** ▶️ Playing\n"
-        f"**Quality:** 192kbps\n\n"
-        f"Use controls below!",
-        reply_markup=controls
+        f"**🔍 Search Results for:** `{query}`\n\n"
+        "1. **Song Title 1**\n"
+        "   👤 Artist • ⏱️ 3:45\n\n"
+        "2. **Song Title 2**\n"
+        "   👤 Artist • ⏱️ 4:20\n\n"
+        "3. **Song Title 3**\n"
+        "   👤 Artist • ⏱️ 3:15\n\n"
+        "Reply with number to play!"
     )
 
-@app.on_message(filters.command("premium") & filters.private)
+@bot.on_message(filters.command("premium") & filters.private)
 async def premium_command(client: Client, message: Message):
-    """Premium features"""
+    """Premium features command"""
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🎁 Redeem Code", callback_data="redeem"),
             InlineKeyboardButton("💳 Buy Premium", url="https://t.me/admin")
         ],
         [
-            InlineKeyboardButton("✨ Features", callback_data="features"),
+            InlineKeyboardButton("✨ Features", callback_data="premium_features"),
+            InlineKeyboardButton("📊 Compare", callback_data="compare")
+        ],
+        [
             InlineKeyboardButton("🔙 Back", callback_data="main_menu")
         ]
     ])
     
-    await message.reply_text(
-        "**💎 Premium Membership**\n\n"
-        "**Features:**\n"
-        "✅ HD Audio (320kbps)\n"
-        "✅ Unlimited Downloads\n"
-        "✅ All Effects\n"
-        "✅ Custom Stickers\n"
-        "✅ Priority Support\n\n"
-        "**Price:** Contact @admin",
-        reply_markup=keyboard
-    )
+    premium_text = """
+**💎 Premium Membership**
 
-@app.on_message(filters.command("redeem") & filters.private)
+**Features:**
+✅ HD Audio (320kbps)
+✅ Unlimited Downloads
+✅ Priority Queue
+✅ All Effects Unlocked
+✅ Custom Stickers
+✅ Ad-Free Experience
+✅ 24/7 Priority Support
+
+**Price:** Contact @admin
+**Duration:** 30 Days
+
+**Use `/redeem CODE` to activate!**
+    """
+    
+    try:
+        if Config.PREMIUM_EFFECT:
+            await message.reply_animation(
+                Config.PREMIUM_EFFECT,
+                caption=premium_text,
+                reply_markup=keyboard
+            )
+        else:
+            await message.reply_text(premium_text, reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Premium error: {e}")
+        await message.reply_text(premium_text, reply_markup=keyboard)
+
+@bot.on_message(filters.command("redeem") & filters.private)
 async def redeem_command(client: Client, message: Message):
     """Redeem premium code"""
     if len(message.command) < 2:
-        await message.reply_text("**⚠️ Usage:** `/redeem CODE`")
+        await message.reply_text(
+            "**🎁 Redeem Premium Code**\n\n"
+            "Usage: `/redeem YOUR_CODE`\n\n"
+            "**Example:**\n"
+            "`/redeem PREMIUM2024`\n\n"
+            "Get codes from @admin"
+        )
         return
     
     code = message.command[1].upper()
     
-    # Simple code check
-    valid_codes = ["PREMIUM2024", "VIP", "PRO"]
+    # Simple code validation (implement database check)
+    valid_codes = ["PREMIUM2024", "VIPMUSIC", "ELITE", "PRO2024"]
     
     if code in valid_codes:
+        # Success
+        success_text = """
+**🎉 Congratulations!**
+
+**Premium Activated Successfully!**
+✅ Duration: 30 Days
+✅ HD Audio: Enabled
+✅ All Effects: Unlocked
+✅ Premium Stickers: Available
+
+**Enjoy your premium experience!**
+        """
+        
         try:
             if Config.PREMIUM_STICKER:
                 await message.reply_sticker(Config.PREMIUM_STICKER)
         except:
             pass
         
-        await message.reply_text(
-            "**🎉 Congratulations!**\n\n"
-            "**Premium Activated!**\n"
-            "✅ 30 Days Access\n"
-            "✅ All Features Unlocked\n\n"
-            "Enjoy your premium experience!"
-        )
+        await message.reply_text(success_text)
     else:
         await message.reply_text(
             "❌ **Invalid Code!**\n\n"
-            "Contact @admin to get premium."
+            "Please check the code and try again.\n"
+            "Contact @admin to purchase premium."
         )
 
-@app.on_message(filters.command("effects") & filters.private)
+@bot.on_message(filters.command("effects") & filters.private)
 async def effects_command(client: Client, message: Message):
-    """Effects menu"""
+    """Audio effects menu"""
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔊 Bass", callback_data="effect_bass"),
+            InlineKeyboardButton("🔊 Bass Boost", callback_data="effect_bass"),
             InlineKeyboardButton("🌙 Nightcore", callback_data="effect_nightcore")
         ],
         [
@@ -249,95 +404,194 @@ async def effects_command(client: Client, message: Message):
             InlineKeyboardButton("🎵 Reverb", callback_data="effect_reverb")
         ],
         [
-            InlineKeyboardButton("🤖 Robot", callback_data="effect_robot"),
-            InlineKeyboardButton("🐿️ Chipmunk", callback_data="effect_chipmunk")
-        ],
-        [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
-    ])
-    
-    await message.reply_text(
-        "**🎨 Audio Effects**\n\n"
-        "Choose an effect to apply:",
-        reply_markup=keyboard
-    )
-
-@app.on_message(filters.command("sticker") & filters.private)
-async def sticker_command(client: Client, message: Message):
-    """Sticker menu"""
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎵 Music Stickers", callback_data="sticker_music"),
-            InlineKeyboardButton("⭐ Premium", callback_data="sticker_premium")
+            InlineKeyboardButton("🐿️ Chipmunk", callback_data="effect_chipmunk"),
+            InlineKeyboardButton("🤖 Robot", callback_data="effect_robot")
         ],
         [
-            InlineKeyboardButton("📦 Get Pack", url="https://t.me/addstickers/your_pack"),
+            InlineKeyboardButton("🐌 Slowed", callback_data="effect_slowed"),
+            InlineKeyboardButton("⚡ Speed Up", callback_data="effect_speed")
+        ],
+        [
+            InlineKeyboardButton("💎 Premium Effects ⭐", callback_data="premium_effects")
+        ],
+        [
             InlineKeyboardButton("🔙 Back", callback_data="main_menu")
         ]
     ])
     
     await message.reply_text(
-        "**🎯 Sticker System**\n\n"
-        "Choose sticker category:",
+        "**🎨 Audio Effects Studio**\n\n"
+        "**Free Effects:**\n"
+        "• 🔊 Bass Boost\n"
+        "• 🔁 Echo\n"
+        "• 🐿️ Chipmunk\n"
+        "• 🤖 Robot\n\n"
+        "**Premium Effects: ⭐**\n"
+        "• 🌙 Nightcore\n"
+        "• 🎵 Reverb\n"
+        "• 🐌 Slowed + Reverb\n"
+        "• ⚡ Speed Up\n\n"
+        "Choose an effect to apply!",
         reply_markup=keyboard
     )
 
-@app.on_message(filters.command("stats") & filters.private)
+@bot.on_message(filters.command("sticker") & filters.private)
+async def sticker_command(client: Client, message: Message):
+    """Custom sticker system"""
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎵 Music Stickers", callback_data="sticker_music"),
+            InlineKeyboardButton("✨ Premium", callback_data="sticker_premium")
+        ],
+        [
+            InlineKeyboardButton("🎨 Create Custom", callback_data="sticker_create"),
+            InlineKeyboardButton("📦 Get Pack", url="https://t.me/addstickers/your_pack")
+        ],
+        [
+            InlineKeyboardButton("🔥 Trending", callback_data="sticker_trending"),
+            InlineKeyboardButton("🆕 New", callback_data="sticker_new")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back", callback_data="main_menu")
+        ]
+    ])
+    
+    await message.reply_text(
+        "**🎯 Custom Sticker System**\n\n"
+        "Choose sticker category:\n\n"
+        "• 🎵 Music themed stickers\n"
+        "• ✨ Premium exclusive stickers\n"
+        "• 🎨 Custom sticker creator\n"
+        "• 📦 Get sticker packs\n\n"
+        "Create your own unique stickers!",
+        reply_markup=keyboard
+    )
+
+@bot.on_message(filters.command("stats") & filters.private)
 async def stats_command(client: Client, message: Message):
     """User statistics"""
     user = message.from_user
     
-    await message.reply_text(
-        f"**📊 Statistics**\n\n"
-        f"**User:** {user.first_name}\n"
-        f"**Username:** @{user.username or 'None'}\n"
-        f"**ID:** `{user.id}`\n\n"
-        f"**Status:** {'⭐ Premium' if False else '🔈 Free'}\n"
-        f"**Total Streams:** 0\n"
-        f"**Joined:** Today"
-    )
+    stats_text = f"""
+**📊 Your Statistics**
 
-@app.on_message(filters.command("help") & filters.private)
+**User Info:**
+• Name: {user.first_name}
+• Username: @{user.username or 'N/A'}
+• ID: `{user.id}`
+
+**Activity:**
+• Total Streams: 0
+• Total Time: 0 mins
+• Favorite Genre: Not set
+
+**Status:**
+• Account: 🔈 Free
+• Joined: Today
+
+**Top 5 Songs:**
+No streams yet!
+
+**Use the bot to build your stats!**
+    """
+    
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 Refresh", callback_data="refresh_stats"),
+            InlineKeyboardButton("📈 Detailed", callback_data="detailed_stats")
+        ],
+        [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
+    ])
+    
+    await message.reply_text(stats_text, reply_markup=keyboard)
+
+@bot.on_message(filters.command("help") & filters.private)
 async def help_command(client: Client, message: Message):
     """Help command"""
     help_text = """
-**📚 Commands:**
+**📚 Command List**
 
-**🎵 Music:**
-`/play` - Play music
-`/search` - Search songs
-`/lyrics` - Get lyrics
-`/stop` - Stop playing
+**🎵 Music Commands:**
+`/play [song]` - Play music
+`/search [query]` - Search songs
+`/lyrics [song]` - Get lyrics
+`/skip` - Skip track
+`/stop` - Stop music
+`/loop` - Toggle loop
 
 **🎨 Effects:**
 `/effects` - Effects menu
-`/effect` - Apply effect
+`/effect [name]` - Apply effect
 
 **⭐ Premium:**
 `/premium` - Premium info
-`/redeem` - Redeem code
+`/redeem [code]` - Activate premium
 
 **🎯 Stickers:**
 `/sticker` - Sticker menu
 
 **📊 Other:**
-`/stats` - Statistics
-`/help` - This menu
+`/stats` - Your stats
+`/settings` - Bot settings
+`/about` - About bot
+`/donate` - Support us
+
+**Need help?** @admin
     """
     
     keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💎 Premium", url="https://t.me/admin"),
+            InlineKeyboardButton("📞 Support", url="https://t.me/admin")
+        ],
         [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
     ])
     
-    await message.reply_text(help_text, reply_markup=keyboard)
+    await message.reply_text(
+        help_text,
+        reply_markup=keyboard,
+        disable_web_page_preview=True
+    )
 
-# Callback Query Handler
-@app.on_callback_query()
-async def handle_callbacks(client: Client, callback: CallbackQuery):
+@bot.on_message(filters.command("about") & filters.private)
+async def about_command(client: Client, message: Message):
+    """About command"""
+    about_text = """
+**🎵 About Premium Music Bot**
+
+**Version:** 2.0
+**Developer:** @admin
+**Framework:** Pyrogram
+
+**Features:**
+• YouTube Music Streaming
+• Audio Effects Studio
+• Custom Stickers System
+• Premium Membership
+• 24/7 Availability
+
+**Statistics:**
+• Total Users: 1,000+
+• Songs Played: 10,000+
+• Premium Users: 100+
+
+**Support:** @admin
+**Channel:** @channel
+    """
+    
+    await message.reply_text(about_text)
+
+# ============================================
+# CALLBACK QUERY HANDLER
+# ============================================
+
+@bot.on_callback_query()
+async def callback_handler(client: Client, callback: CallbackQuery):
     """Handle all callback queries"""
     try:
         data = callback.data
         
-        # Answer callback first
+        # Answer callback
         await callback.answer()
         
         if data == "main_menu":
@@ -357,7 +611,7 @@ async def handle_callbacks(client: Client, callback: CallbackQuery):
             ])
             
             await callback.message.edit_text(
-                "**🎵 Main Menu**\nSelect an option:",
+                "**🎵 Main Menu**\n\nSelect an option:",
                 reply_markup=keyboard
             )
         
@@ -366,61 +620,17 @@ async def handle_callbacks(client: Client, callback: CallbackQuery):
                 "**🎵 Play Music**\n\n"
                 "Send me a song name:\n"
                 "`/play song name`\n\n"
-                "Or send YouTube link directly!"
+                "Or send a YouTube link!"
             )
         
         elif data == "effects":
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("🔊 Bass", callback_data="effect_bass"),
-                    InlineKeyboardButton("🌙 Nightcore", callback_data="effect_nightcore")
-                ],
-                [
-                    InlineKeyboardButton("🤖 Robot", callback_data="effect_robot"),
-                    InlineKeyboardButton("🐿️ Chipmunk", callback_data="effect_chipmunk")
-                ],
-                [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
-            ])
-            
-            await callback.message.edit_text(
-                "**🎨 Choose Effect:**",
-                reply_markup=keyboard
-            )
-        
-        elif data.startswith("effect_"):
-            effect = data.replace("effect_", "").title()
-            await callback.answer(f"✅ {effect} effect applied!", show_alert=True)
-            await callback.message.reply_text(
-                f"**🎨 {effect} Effect Applied!**"
-            )
+            await effects_command(client, callback.message)
         
         elif data == "premium":
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("🎁 Redeem", callback_data="redeem"),
-                    InlineKeyboardButton("💳 Buy", url="https://t.me/admin")
-                ],
-                [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
-            ])
-            
-            await callback.message.edit_text(
-                "**💎 Premium**\n\nChoose option:",
-                reply_markup=keyboard
-            )
-        
-        elif data == "redeem":
-            await callback.message.edit_text(
-                "**🎁 Redeem Code**\n\n"
-                "Use: `/redeem YOUR_CODE`\n\n"
-                "Get codes from @admin"
-            )
+            await premium_command(client, callback.message)
         
         elif data == "stickers":
-            await callback.message.edit_text(
-                "**🎯 Stickers**\n\n"
-                "Use `/sticker` to browse\n"
-                "Get pack: @PremiumMusicStickers"
-            )
+            await sticker_command(client, callback.message)
         
         elif data == "stats":
             await stats_command(client, callback.message)
@@ -428,11 +638,54 @@ async def handle_callbacks(client: Client, callback: CallbackQuery):
         elif data == "help":
             await help_command(client, callback.message)
         
+        elif data.startswith("effect_"):
+            effect = data.replace("effect_", "").title()
+            await callback.answer(f"✅ {effect} effect applied!", show_alert=True)
+            await callback.message.reply_text(
+                f"**🎨 {effect} Effect Applied!**\n\n"
+                "Your audio is now processed."
+            )
+        
+        elif data == "redeem":
+            await callback.message.edit_text(
+                "**🎁 Redeem Premium Code**\n\n"
+                "Use: `/redeem YOUR_CODE`\n\n"
+                "Get codes from @admin"
+            )
+        
+        elif data == "premium_features":
+            features = """
+**✨ Premium Features**
+
+**Audio:**
+✅ 320kbps HD Audio
+✅ All Audio Effects
+✅ Custom EQ Settings
+✅ Lossless Downloads
+
+**Exclusive:**
+✅ Premium Stickers
+✅ Custom Animations
+✅ Priority Support
+✅ Early Access
+
+**Unlimited:**
+✅ No Download Limits
+✅ No Queue Waiting
+✅ No Advertisements
+✅ All Features Unlocked
+            """
+            
+            await callback.message.edit_text(
+                features,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Back", callback_data="premium")]
+                ])
+            )
+        
         else:
             await callback.answer("Feature coming soon!")
     
-    except MessageNotModified:
-        pass
     except Exception as e:
         logger.error(f"Callback error: {e}")
         try:
@@ -440,27 +693,75 @@ async def handle_callbacks(client: Client, callback: CallbackQuery):
         except:
             pass
 
-# Error handler for messages
-@app.on_message(filters.command("test") & filters.private)
-async def test_command(client: Client, message: Message):
-    """Test bot response"""
-    await message.reply_text(
-        "✅ **Bot is working!**\n\n"
-        f"Pyrogram Version: `{pyrogram.__version__}`\n"
-        f"Bot Username: @{client.me.username}"
-    )
+# ============================================
+# KEEP ALIVE SYSTEM
+# ============================================
 
-# Run bot
+async def keep_alive():
+    """Keep the bot alive by pinging itself"""
+    import aiohttp
+    
+    while True:
+        try:
+            if Config.APP_URL:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"{Config.APP_URL}/health") as resp:
+                        if resp.status == 200:
+                            logger.info("✅ Keep-alive ping successful")
+        except Exception as e:
+            logger.error(f"Keep-alive error: {e}")
+        
+        await asyncio.sleep(300)  # 5 minutes
+
+# ============================================
+# MAIN ENTRY POINT
+# ============================================
+
+async def main():
+    """Main function to run everything"""
+    # Start Flask in thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("✅ Flask server started")
+    
+    # Start keep-alive task
+    asyncio.create_task(keep_alive())
+    logger.info("✅ Keep-alive started")
+    
+    # Start bot
+    logger.info("🚀 Starting Telegram Music Bot...")
+    await bot.start()
+    
+    # Get bot info
+    me = await bot.get_me()
+    logger.info(f"✅ Bot @{me.username} is running!")
+    
+    # Send startup message to owner
+    try:
+        await bot.send_message(
+            Config.OWNER_ID,
+            f"✅ **Bot Started!**\n\n"
+            f"**Bot:** @{me.username}\n"
+            f"**Status:** Running\n"
+            f"**Mode:** {'Production' if Config.APP_URL else 'Development'}"
+        )
+    except Exception as e:
+        logger.error(f"Could not send startup message: {e}")
+    
+    # Keep running
+    await asyncio.Event().wait()
+
 if __name__ == "__main__":
     try:
-        # Start Flask in thread
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
+        # Check environment
+        if not Config.API_ID or not Config.API_HASH or not Config.BOT_TOKEN:
+            logger.error("❌ Missing API credentials! Check your .env file")
+            sys.exit(1)
         
-        # Start bot
-        logger.info("Starting Music Bot...")
-        app.run()
+        # Run bot
+        asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("👋 Bot stopped by user")
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.error(f"❌ Fatal error: {e}")
+        sys.exit(1)
