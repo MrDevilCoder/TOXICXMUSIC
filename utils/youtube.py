@@ -1,77 +1,115 @@
-import aiohttp
-from config import YOUTUBE_API_KEY
-import re
+import yt_dlp
+import asyncio
+import os
+from typing import Optional, Dict, List
+from bot.config import Config
 
-async def search_youtube(query, max_results=1):
-    """Search YouTube for videos"""
-    if YOUTUBE_API_KEY:
-        return await search_with_api(query, max_results)
-    else:
-        return await search_without_api(query, max_results)
-
-async def search_with_api(query, max_results=1):
-    """Search using YouTube Data API"""
-    url = "https://www.googleapis.com/youtube/v3/search"
-    params = {
-        'part': 'snippet',
-        'q': query,
-        'type': 'video',
-        'maxResults': max_results,
-        'key': YOUTUBE_API_KEY
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params) as response:
-            if response.status == 200:
-                data = await response.json()
-                results = []
+class YouTubeDownloader:
+    def __init__(self):
+        self.ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': Config.DEFAULT_QUALITY,
+            }],
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'cookiefile': 'cookies.txt' if os.path.exists('cookies.txt') else None
+        }
+        
+    async def search(self, query: str, max_results: int = 1) -> Optional[Dict]:
+        """Search YouTube and return video info"""
+        search_opts = {
+            **self.ydl_opts,
+            'format': 'best',
+            'noplaylist': True,
+            'quiet': True
+        }
+        
+        if max_results > 1:
+            search_opts['extract_flat'] = True
+            
+        try:
+            with yt_dlp.YoutubeDL(search_opts) as ydl:
+                info = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
                 
-                for item in data.get('items', []):
-                    video_id = item['id']['videoId']
-                    snippet = item['snippet']
-                    
-                    results.append({
-                        'title': snippet['title'],
-                        'artist': snippet['channelTitle'],
-                        'url': f"https://youtube.com/watch?v={video_id}",
-                        'video_id': video_id,
-                        'thumbnail': snippet['thumbnails']['high']['url'],
-                        'duration': 'Unknown'  # Would need separate API call
-                    })
-                
-                return results[0] if results else None
-    return None
-
-async def search_without_api(query, max_results=1):
-    """Search without API (web scraping fallback)"""
-    search_url = f"https://www.youtube.com/results?search_query={query}"
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.get(search_url) as response:
-            if response.status == 200:
-                html = await response.text()
-                
-                # Extract video IDs
-                video_ids = re.findall(r'watch\?v=(\S{11})', html)
-                
-                if video_ids:
-                    video_id = video_ids[0]
-                    # Get title
-                    title_match = re.findall(r'"title":{"runs":\[{"text":"([^"]+)"', html)
-                    title = title_match[0] if title_match else "Unknown Title"
-                    
+                if max_results == 1:
+                    if 'entries' in info:
+                        info = info['entries'][0]
                     return {
-                        'title': title,
-                        'artist': 'Unknown',
-                        'url': f"https://youtube.com/watch?v={video_id}",
-                        'video_id': video_id,
-                        'thumbnail': f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
-                        'duration': 'Unknown'
+                        'title': info.get('title', 'Unknown'),
+                        'url': info.get('webpage_url', ''),
+                        'duration': info.get('duration', 0),
+                        'uploader': info.get('uploader', 'Unknown'),
+                        'thumbnail': info.get('thumbnail', ''),
+                        'view_count': info.get('view_count', 0),
+                        'like_count': info.get('like_count', 0)
                     }
-    return None
-
-def format_duration(seconds):
-    """Format duration from seconds to mm:ss"""
-    minutes = seconds // 60
-    seconds = seconds % 60
-    return f"{minutes}:{seconds:02d}"
+                else:
+                    results = []
+                    if 'entries' in info:
+                        for entry in info['entries'][:max_results]:
+                            results.append({
+                                'title': entry.get('title', 'Unknown'),
+                                'url': entry.get('url', ''),
+                                'duration': entry.get('duration', 0),
+                                'uploader': entry.get('uploader', 'Unknown')
+                            })
+                    return results
+                    
+        except Exception as e:
+            print(f"Search error: {e}")
+            return None
+    
+    async def download_audio(self, url: str, quality: str = None) -> tuple:
+        """Download audio from YouTube"""
+        if not quality:
+            quality = Config.DEFAULT_QUALITY
+            
+        download_opts = {
+            **self.ydl_opts,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': quality,
+            }],
+            'outtmpl': 'downloads/%(title)s_%(id)s.%(ext)s',
+            'restrictfilenames': True,
+            'max_filesize': Config.MAX_DOWNLOAD_SIZE,
+            'quiet': True
+        }
+        
+        os.makedirs('downloads', exist_ok=True)
+        
+        try:
+            with yt_dlp.YoutubeDL(download_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+                mp3_filename = filename.rsplit('.', 1)[0] + '.mp3'
+                
+                if os.path.exists(mp3_filename):
+                    return mp3_filename, info
+                return None, None
+                
+        except Exception as e:
+            print(f"Download error: {e}")
+            return None, None
+    
+    async def get_video_info(self, url: str) -> Optional[Dict]:
+        """Get video information"""
+        try:
+            with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                return {
+                    'title': info.get('title', 'Unknown'),
+                    'description': info.get('description', '')[:200],
+                    'duration': info.get('duration', 0),
+                    'uploader': info.get('uploader', 'Unknown'),
+                    'thumbnail': info.get('thumbnail', ''),
+                    'url': info.get('webpage_url', '')
+                }
+        except Exception as e:
+            print(f"Info error: {e}")
+            return None
