@@ -1,25 +1,49 @@
-# Core Bot
-pyrogram==2.1.6
+# Core Bot Framework - CORRECT VERSIONS
+pyrogram==2.0.106
 tgcrypto==1.2.5
 
-# Web Server
-flask==3.0.3
-gunicorn==22.0.0
-
-# Async Support
+# Async HTTP
 aiohttp==3.9.5
 aiofiles==23.2.1
 
+# Web Framework
+flask==3.0.3
+fastapi==0.111.0
+uvicorn==0.29.0
+gunicorn==22.0.0
+
+# YouTube Downloading
+yt-dlp==2024.5.27
+youtube-search-python==1.6.6
+
 # Database
 aiosqlite==0.20.0
+sqlalchemy==2.0.30
+redis==5.0.4
 
-# YouTube
-yt-dlp==2024.5.27
-
-# Audio
+# Audio Processing
 pydub==0.25.1
+ffmpeg-python==0.2.0
+
+# Image Processing
+Pillow==10.3.0
+
+# Cloud Services
+cloudflare==2.20.0
 
 # Utilities
 python-dotenv==1.0.1
-loguru==0.7.2
 requests==2.31.0
+loguru==0.7.2
+
+# Lyrics
+lyricsgenius==3.0.1
+
+# Caching
+cachetools==5.3.3
+
+# Rate Limiting
+ratelimit==2.2.1
+
+# Scheduling
+APScheduler==3.10.4
