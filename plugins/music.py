@@ -1,213 +1,159 @@
-import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
-import yt_dlp
 import os
-from collections import deque
-import uuid
-from utils.youtube import search_youtube
+import asyncio
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+import yt_dlp
+from utils.youtube import YouTubeDownloader
+from bot.config import Config
 
-class MusicQueue:
+class MusicPlayer:
     def __init__(self):
-        self.queues = {}
-        self.now_playing = {}
-        self.loop_modes = {}  # 0=off, 1=song, 2=queue
-    
-    def get_queue(self, chat_id):
-        if chat_id not in self.queues:
-            self.queues[chat_id] = deque()
-        return self.queues[chat_id]
-    
-    def add_to_queue(self, chat_id, song_info):
-        queue = self.get_queue(chat_id)
-        queue.append(song_info)
-        return len(queue)
-    
-    def get_current_song(self, chat_id):
-        return self.now_playing.get(chat_id)
-    
-    def clear_queue(self, chat_id):
-        if chat_id in self.queues:
-            self.queues[chat_id].clear()
-
-class MusicPlugin:
-    def __init__(self):
-        self.queue = MusicQueue()
-        self.ydl_opts = {
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'quiet': True,
-            'no_warnings': True,
-        }
-    
-    async def play(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Play music command"""
-        if not context.args:
-            await update.message.reply_text(
-                "❌ Please provide a song name or URL!\n"
-                "Example: /play Believer"
-            )
-            return
+        self.downloader = YouTubeDownloader()
+        self.active_streams = {}
         
-        query = ' '.join(context.args)
-        chat_id = update.effective_chat.id
-        user_id = update.effective_user.id
+    async def search_and_play(self, message: Message, query: str):
+        """Search YouTube and play music"""
+        user_id = message.from_user.id
+        is_premium = await message._client.db.is_premium(user_id)
         
-        # Send searching message
-        status_msg = await update.message.reply_text(
-            f"🔍 Searching for: **{query}**...",
-            parse_mode='Markdown'
+        # Status message with animation
+        status = await message.reply_animation(
+            Config.MUSIC_EFFECT_ID,
+            caption=f"🔍 **Searching:** `{query}`\n{'⭐ Premium Search' if is_premium else '🔍 Free Search'}"
         )
         
         try:
-            # Search for the song
-            song_info = await search_youtube(query)
+            # Search YouTube
+            video_info = await self.downloader.search(query)
             
-            if not song_info:
-                await status_msg.edit_text("❌ No results found!")
+            if not video_info:
+                await status.edit_caption("❌ **No results found!**\nTry different keywords.")
                 return
             
-            # Add to queue
-            position = self.queue.add_to_queue(chat_id, {
-                'info': song_info,
-                'requested_by': user_id,
-                'id': str(uuid.uuid4())
-            })
+            # Update status
+            await status.edit_caption(
+                f"🎵 **Found:** {video_info['title'][:50]}\n"
+                f"📊 Duration: {video_info['duration']}s\n"
+                f"👤 Artist: {video_info.get('uploader', 'Unknown')}\n\n"
+                f"⏳ Downloading..."
+            )
             
-            # Create response keyboard
-            keyboard = InlineKeyboardMarkup([
+            # Download audio
+            audio_path, info = await self.downloader.download_audio(
+                video_info['url'],
+                quality=Config.PREMIUM_QUALITY if is_premium else Config.DEFAULT_QUALITY
+            )
+            
+            if not audio_path:
+                await status.edit_caption("❌ **Download failed!**")
+                return
+            
+            # Create player controls
+            controls = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("⏭️ Skip", callback_data="skip"),
-                    InlineKeyboardButton("⏸️ Pause", callback_data="pause")
+                    InlineKeyboardButton("⏸️ Pause", callback_data="player_pause"),
+                    InlineKeyboardButton("▶️ Resume", callback_data="player_resume"),
+                    InlineKeyboardButton("⏹️ Stop", callback_data="player_stop")
                 ],
                 [
-                    InlineKeyboardButton("🔊 Volume", callback_data="volume_menu"),
-                    InlineKeyboardButton("🔄 Loop", callback_data="loop_toggle")
+                    InlineKeyboardButton("🔁 Loop", callback_data="player_loop"),
+                    InlineKeyboardButton("🔀 Shuffle", callback_data="player_shuffle"),
+                    InlineKeyboardButton("📝 Lyrics", callback_data=f"lyrics_{video_info['title']}")
+                ],
+                [
+                    InlineKeyboardButton("🎨 Effects", callback_data="player_effects"),
+                    InlineKeyboardButton("📤 Share", callback_data="player_share")
                 ]
             ])
             
-            # Edit status message
-            await status_msg.edit_text(
-                f"✅ **Added to Queue** #{position}\n\n"
-                f"🎵 **{song_info['title']}**\n"
-                f"👤 **Artist:** {song_info.get('artist', 'Unknown')}\n"
-                f"⏱️ **Duration:** {song_info.get('duration', 'N/A')}\n"
-                f"🔗 [Watch on YouTube]({song_info['url']})",
-                parse_mode='Markdown',
-                reply_markup=keyboard,
-                disable_web_page_preview=True
-            )
-            
-            # If this is the only song, start playing
-            if position == 1:
-                await self.start_playing(update, context, chat_id)
-            
-        except Exception as e:
-            await status_msg.edit_text(f"❌ Error: {str(e)}")
-    
-    async def start_playing(self, update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id):
-        """Start playing the first song in queue"""
-        # This would connect to voice chat and start streaming
-        # Implementation depends on your voice chat library (py-tgcalls, etc.)
-        pass
-    
-    async def pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Pause current playback"""
-        await update.message.reply_text("⏸️ Playback paused")
-    
-    async def resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Resume playback"""
-        await update.message.reply_text("▶️ Playback resumed")
-    
-    async def skip(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Skip current song"""
-        await update.message.reply_text("⏭️ Skipped to next song")
-    
-    async def loop(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Toggle loop mode"""
-        chat_id = update.effective_chat.id
-        modes = {0: "Off", 1: "Song", 2: "Queue"}
-        
-        current = self.queue.loop_modes.get(chat_id, 0)
-        new_mode = (current + 1) % 3
-        self.queue.loop_modes[chat_id] = new_mode
-        
-        await update.message.reply_text(f"🔄 Loop mode: **{modes[new_mode]}**", parse_mode='Markdown')
-    
-    async def shuffle(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Shuffle the queue"""
-        import random
-        chat_id = update.effective_chat.id
-        queue = self.queue.get_queue(chat_id)
-        
-        if len(queue) > 1:
-            queue_list = list(queue)
-            random.shuffle(queue_list)
-            self.queue.queues[chat_id] = deque(queue_list)
-            await update.message.reply_text("🔀 Queue shuffled!")
-        else:
-            await update.message.reply_text("📊 Not enough songs in queue to shuffle!")
-    
-    async def show_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show current queue"""
-        chat_id = update.effective_chat.id
-        queue = self.queue.get_queue(chat_id)
-        
-        if not queue:
-            await update.message.reply_text("📊 Queue is empty!")
-            return
-        
-        queue_text = "📊 **Current Queue:**\n\n"
-        for i, song in enumerate(queue, 1):
-            info = song['info']
-            queue_text += f"{i}. **{info['title']}**\n"
-            queue_text += f"   ⏱️ {info.get('duration', 'N/A')}\n\n"
-        
-        await update.message.reply_text(queue_text, parse_mode='Markdown')
-    
-    async def now_playing(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show currently playing song"""
-        chat_id = update.effective_chat.id
-        current = self.queue.get_current_song(chat_id)
-        
-        if current:
-            await update.message.reply_text(
-                f"🎵 **Now Playing:**\n\n"
-                f"**{current['info']['title']}**\n"
-                f"⏱️ {current['info'].get('duration', 'N/A')}",
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text("❌ Nothing is playing right now!")
-    
-    async def volume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Adjust volume"""
-        if not context.args:
-            await update.message.reply_text("🔊 Current volume: 100%")
-            return
-        
-        try:
-            vol = int(context.args[0])
-            if 0 <= vol <= 100:
-                await update.message.reply_text(f"🔊 Volume set to: **{vol}%**", parse_mode='Markdown')
-            else:
-                await update.message.reply_text("❌ Volume must be between 0 and 100!")
-        except ValueError:
-            await update.message.reply_text("❌ Please provide a valid number!")
-    
-    async def stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Stop music and leave voice chat"""
-        chat_id = update.effective_chat.id
-        self.queue.clear_queue(chat_id)
-        await update.message.reply_text("⏹️ Stopped playing and cleared queue!")
-    
-    async def search_and_play(self, update: Update, context: ContextTypes.DEFAULT_TYPE, query):
-        """Handle text search for songs"""
-        context.args = [query]
-        await self.play(update, context)
+            # Send the audio file
+            await message.reply_audio(
+                audio=audio_path,
+                title=video_info.get('title', 'Unknown'),
+                performer=video_info.get('uploader', 'Unknown'),
+                duration=int(video_info.get('duration', 0)),
+                caption=f"""
+**🎵 Now Playing**
 
-# Search function in utils/youtube.py
+**Title:** {video_info.get('title', 'Unknown')}
+**Artist:** {video_info.get('uploader', 'Unknown')}
+**Duration:** {video_info.get('duration', 0)}s
+**Quality:** {'🔊 HD 320kbps' if is_premium else '🔈 Standard 192kbps'}
+
+{'⭐ **Premium Stream**' if is_premium else '🔈 **Free Stream**'}
+                """,
+                reply_markup=controls,
+                thumb=video_info.get('thumbnail')
+            )
+            
+            # Log stream
+            await message._client.db.log_stream(
+                user_id,
+                video_info['title'],
+                video_info['url'],
+                int(video_info.get('duration', 0)),
+                Config.PREMIUM_QUALITY if is_premium else Config.DEFAULT_QUALITY
+            )
+            
+            # Clean up
+            await status.delete()
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+                
+        except Exception as e:
+            await status.edit_caption(f"❌ **Error:** `{str(e)}`\n\nPlease try again!")
+    
+    async def get_lyrics(self, message: Message, song_name: str):
+        """Fetch lyrics for a song"""
+        try:
+            import lyricsgenius
+            genius = lyricsgenius.Genius(Config.GENIUS_API_KEY)
+            song = genius.search_song(song_name)
+            
+            if song:
+                lyrics = song.lyrics[:4000]  # Telegram message limit
+                await message.reply(
+                    f"**📝 Lyrics for:** {song_name}\n\n{lyrics}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔍 Full Lyrics", url=song.url)]
+                    ])
+                )
+            else:
+                await message.reply("❌ Lyrics not found!")
+        except Exception as e:
+            await message.reply("❌ Error fetching lyrics!")
+
+# Plugin handlers
+@Client.on_message(filters.command("play") & filters.private)
+async def play_handler(client: Client, message: Message):
+    if len(message.command) < 2:
+        await message.reply("⚠️ Usage: `/play Song Name`")
+        return
+    
+    query = " ".join(message.command[1:])
+    player = MusicPlayer()
+    await player.search_and_play(message, query)
+
+@Client.on_message(filters.command("search") & filters.private)
+async def search_handler(client: Client, message: Message):
+    if len(message.command) < 2:
+        await message.reply("⚠️ Usage: `/search Song Name`")
+        return
+    
+    query = " ".join(message.command[1:])
+    player = MusicPlayer()
+    
+    results = await player.downloader.search(query, max_results=5)
+    
+    if not results:
+        await message.reply("❌ No results found!")
+        return
+    
+    text = "**🔍 Search Results:**\n\n"
+    for i, result in enumerate(results, 1):
+        text += f"{i}. **{result['title'][:50]}**\n"
+        text += f"   👤 {result.get('uploader', 'Unknown')}\n"
+        text += f"   ⏱️ {result.get('duration', 0)}s\n\n"
+    
+    text += "Reply with the number to play!"
+    await message.reply(text)
