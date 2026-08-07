@@ -1,227 +1,457 @@
 import os
+import asyncio
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
-    ContextTypes
+from pyrogram import Client, filters, idle
+from pyrogram.types import (
+    Message, InlineKeyboardMarkup, InlineKeyboardButton,
+    CallbackQuery, InputMediaAudio
 )
-from config import BOT_TOKEN, OWNER_ID, PREMIUM_STICKER_ID, EFFECT_IDS
-from plugins.music import MusicPlugin
-from plugins.premium import PremiumPlugin
-from plugins.stickers import StickerPlugin
-from plugins.effects import EffectsPlugin
-import json
-from datetime import datetime, timedelta
+from pyrogram.errors import FloodWait
+from pyrogram.handlers import MessageHandler, CallbackQueryHandler
+from aiohttp import web
+import threading
+from flask import Flask
+from bot.config import Config
+from bot.helpers import get_readable_time
+from utils.database import Database
+from utils.keep_alive import KeepAlive
+from utils.cloudflare import CloudflareManager
 
-# Setup logging
+# Logging setup
 logging.basicConfig(
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
-class MusicBot:
+# Flask app for health checks
+health_app = Flask(__name__)
+
+@health_app.route('/')
+def home():
+    return """
+    <html>
+        <head><title>Music Bot Status</title></head>
+        <body style="background: #1a1a2e; color: #eee; font-family: Arial; text-align: center; padding: 50px;">
+            <h1>🎵 Telegram Music Bot</h1>
+            <p style="color: #00ff00;">✅ Bot is running!</p>
+            <p>Current Time: {}</p>
+        </body>
+    </html>
+    """.format(get_readable_time())
+
+@health_app.route('/health')
+def health():
+    return {"status": "alive", "timestamp": get_readable_time()}, 200
+
+@health_app.route('/ping')
+def ping():
+    return "pong", 200
+
+def run_health_server():
+    port = int(os.environ.get('PORT', 8080))
+    health_app.run(host='0.0.0.0', port=port, debug=False)
+
+class MusicBot(Client):
     def __init__(self):
-        self.music_plugin = MusicPlugin()
-        self.premium_plugin = PremiumPlugin()
-        self.sticker_plugin = StickerPlugin()
-        self.effects_plugin = EffectsPlugin()
-        
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Start command handler"""
-        user_id = update.effective_user.id
-        username = update.effective_user.username
-        
-        # Check if user is premium
-        is_premium = self.premium_plugin.check_premium(user_id)
-        premium_status = "🌟 Premium User" if is_premium else "👤 Free User"
-        
-        welcome_text = f"""
-🎵 **Welcome to Music Bot** 🎵
-
-{premium_status}
-
-**Commands:**
-▶️ /play [song name/url] - Play music
-⏸️ /pause - Pause current song
-▶️ /resume - Resume playback
-⏭️ /skip - Skip current song
-🔄 /loop - Toggle loop mode
-🔀 /shuffle - Shuffle queue
-📊 /queue - Show current queue
-🎵 /now - Show current playing
-🔊 /volume [1-100] - Adjust volume
-⏹️ /stop - Stop music & leave VC
-
-**Premium Commands:**
-🌟 /premium - Get premium features
-🎨 /effects - Audio effects menu
-🎭 /stickers - Premium stickers
-💎 /customsticker - Create custom sticker
-
-**Search:**
-🔍 Just send song name to search
-        """
-        
-        # Premium sticker for premium users
-        if is_premium:
-            await update.message.reply_sticker(PREMIUM_STICKER_ID)
-        
-        await update.message.reply_text(
-            welcome_text,
-            parse_mode='Markdown',
-            reply_markup=self.get_main_keyboard(is_premium)
+        super().__init__(
+            "MusicBot",
+            api_id=Config.API_ID,
+            api_hash=Config.API_HASH,
+            bot_token=Config.BOT_TOKEN,
+            plugins=dict(root="plugins"),
+            workers=50
         )
+        self.db = Database()
+        self.keep_alive = KeepAlive()
+        self.cf = CloudflareManager()
+        
+    async def start(self):
+        await super().start()
+        logger.info("Bot started successfully!")
+        await self.db.initialize()
+        
+        # Start health server in separate thread
+        threading.Thread(target=run_health_server, daemon=True).start()
+        
+        # Start keep-alive mechanism
+        asyncio.create_task(self.keep_alive.start())
+        
+        # Setup Cloudflare
+        if Config.CF_ENABLED:
+            await self.cf.setup_protection()
+        
+        me = await self.get_me()
+        logger.info(f"Bot @{me.username} is running!")
+        
+    async def stop(self):
+        await super().stop()
+        logger.info("Bot stopped!")
+
+# Command handlers
+@Client.on_message(filters.command("start") & filters.private)
+async def start_command(client: Client, message: Message):
+    user = message.from_user
     
-    def get_main_keyboard(self, is_premium=False):
-        """Get main keyboard markup"""
-        keyboard = [
-            [
-                InlineKeyboardButton("▶️ Play", callback_data="menu_play"),
-                InlineKeyboardButton("⏯️ Controls", callback_data="menu_controls")
-            ],
-            [
-                InlineKeyboardButton("📊 Queue", callback_data="menu_queue"),
-                InlineKeyboardButton("🎵 Now Playing", callback_data="now_playing")
-            ]
+    # Add user to database
+    await client.db.add_user(user.id, user.username)
+    
+    # Premium animated keyboard
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎵 Play Music", callback_data="menu_music"),
+            InlineKeyboardButton("🎨 Effects", callback_data="menu_effects")
+        ],
+        [
+            InlineKeyboardButton("⭐ Premium", callback_data="menu_premium"),
+            InlineKeyboardButton("🎯 Stickers", callback_data="menu_stickers")
+        ],
+        [
+            InlineKeyboardButton("📊 Stats", callback_data="menu_stats"),
+            InlineKeyboardButton("ℹ️ Help", callback_data="menu_help")
+        ],
+        [
+            InlineKeyboardButton("💎 Get Premium", url="https://t.me/your_channel")
         ]
-        
-        if is_premium:
-            keyboard.append([
-                InlineKeyboardButton("🌟 Premium Features", callback_data="premium_menu")
-            ])
-        
-        keyboard.append([
-            InlineKeyboardButton("ℹ️ Help", callback_data="help"),
-            InlineKeyboardButton("💎 Premium", callback_data="buy_premium")
-        ])
-        
-        return InlineKeyboardMarkup(keyboard)
+    ])
     
-    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle button callbacks"""
-        query = update.callback_query
-        await query.answer()
-        
-        data = query.data
-        user_id = query.from_user.id
-        
-        if data == "menu_play":
-            await query.message.reply_text(
-                "🎵 Send me the song name or YouTube URL to play!\n\n"
-                "Example: /play Believer"
-            )
-        
-        elif data == "menu_controls":
-            controls_text = """
-🎮 **Music Controls:**
+    # Send welcome with premium sticker
+    await message.reply_animation(
+        Config.PREMIUM_EFFECT_ID,
+        caption=f"""
+**🎵 Welcome to Premium Music Bot!**
 
-▶️ /play - Start playing
-⏸️ /pause - Pause
-▶️ /resume - Resume
-⏭️ /skip - Skip track
-🔄 /loop - Loop mode
-🔀 /shuffle - Shuffle
-🔊 /volume [1-100]
-⏹️ /stop - Stop
-            """
-            await query.message.reply_text(controls_text, parse_mode='Markdown')
-        
-        elif data == "premium_menu":
-            if self.premium_plugin.check_premium(user_id):
-                await self.premium_plugin.show_premium_features(update, context)
-            else:
-                await query.message.reply_text(
-                    "🌟 Premium required!\n"
-                    "Use /premium to upgrade."
-                )
-        
-        elif data == "buy_premium":
-            await self.premium_plugin.premium_plans(update, context)
-        
-        elif data.startswith("effect_"):
-            effect = data.replace("effect_", "")
-            await self.effects_plugin.apply_effect(update, context, effect)
-        
-        elif data.startswith("sticker_"):
-            sticker_type = data.replace("sticker_", "")
-            await self.sticker_plugin.send_premium_sticker(update, context, sticker_type)
-    
-    async def text_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle text messages (search for songs)"""
-        text = update.message.text
-        
-        if not text.startswith('/'):
-            await self.music_plugin.search_and_play(update, context, text)
-    
-    async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Error handler"""
-        logger.error(f"Update {update} caused error {context.error}")
-        
-        if update and update.effective_message:
-            await update.effective_message.reply_text(
-                "❌ An error occurred. Please try again later."
-            )
+**Hello {user.mention}!**
 
-def main():
-    """Main function to run the bot"""
-    # Create application
-    application = Application.builder().token(BOT_TOKEN).build()
+**Features:**
+• 🎵 YouTube Music Streaming
+• 🎨 Audio Effects (Bass, Nightcore, etc.)
+• ⭐ Premium Custom Stickers
+• 💎 Exclusive Effects & Animations
+• 🎯 Custom Sticker Creator
+• 📊 Detailed Statistics
+
+**Premium Benefits:**
+• 320kbps HD Audio
+• Unlimited Downloads
+• Priority Queue
+• Ad-Free Experience
+• Custom Effects
+• Exclusive Stickers
+
+**Use buttons below to navigate!**
+        """,
+        reply_markup=keyboard
+    )
+
+@Client.on_message(filters.command("play") & filters.private)
+async def play_command(client: Client, message: Message):
+    if len(message.command) < 2:
+        await message.reply_animation(
+            Config.MUSIC_EFFECT_ID,
+            caption="⚠️ **Please provide a song name!**\n\n"
+                   "Usage: `/play Song Name`\n"
+                   "Example: `/play Shape of You`\n\n"
+                   "Or send me a YouTube link directly!"
+        )
+        return
     
-    bot = MusicBot()
+    query = " ".join(message.command[1:])
     
-    # Command handlers
-    application.add_handler(CommandHandler("start", bot.start))
-    application.add_handler(CommandHandler("help", bot.start))
+    # Check premium status
+    is_premium = await client.db.is_premium(message.from_user.id)
     
-    # Music commands
-    application.add_handler(CommandHandler("play", bot.music_plugin.play))
-    application.add_handler(CommandHandler("pause", bot.music_plugin.pause))
-    application.add_handler(CommandHandler("resume", bot.music_plugin.resume))
-    application.add_handler(CommandHandler("skip", bot.music_plugin.skip))
-    application.add_handler(CommandHandler("loop", bot.music_plugin.loop))
-    application.add_handler(CommandHandler("shuffle", bot.music_plugin.shuffle))
-    application.add_handler(CommandHandler("queue", bot.music_plugin.show_queue))
-    application.add_handler(CommandHandler("now", bot.music_plugin.now_playing))
-    application.add_handler(CommandHandler("volume", bot.music_plugin.volume))
-    application.add_handler(CommandHandler("stop", bot.music_plugin.stop))
+    status_msg = await message.reply_animation(
+        Config.MUSIC_EFFECT_ID,
+        caption=f"🔍 **Searching for:** `{query}`\n\n"
+                f"{'⭐ Premium Search' if is_premium else '🔍 Free Search'}"
+    )
     
-    # Premium commands
-    application.add_handler(CommandHandler("premium", bot.premium_plugin.premium_plans))
-    application.add_handler(CommandHandler("customsticker", bot.sticker_plugin.create_custom_sticker))
-    application.add_handler(CommandHandler("effects", bot.effects_plugin.effects_menu))
+    # Process music request
+    await client.db.log_stream(message.from_user.id, query)
     
-    # Button handler
-    application.add_handler(CallbackQueryHandler(bot.button_handler))
+    # Call music plugin
+    await message.reply(
+        f"🎵 Playing: {query}\n"
+        f"{'🔊 HD Audio' if is_premium else '🔈 Standard Audio'}"
+    )
+
+@Client.on_message(filters.command("effects") & filters.private)
+async def effects_command(client: Client, message: Message):
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔊 Bass Boost", callback_data="effect_bass"),
+            InlineKeyboardButton("🌙 Nightcore", callback_data="effect_nightcore")
+        ],
+        [
+            InlineKeyboardButton("🔁 Echo", callback_data="effect_echo"),
+            InlineKeyboardButton("🎵 Reverb", callback_data="effect_reverb")
+        ],
+        [
+            InlineKeyboardButton("🐿️ Chipmunk", callback_data="effect_chipmunk"),
+            InlineKeyboardButton("🤖 Robot", callback_data="effect_robot")
+        ],
+        [
+            InlineKeyboardButton("💎 Premium Effects", callback_data="premium_effects"),
+        ],
+        [
+            InlineKeyboardButton("🔙 Back", callback_data="main_menu")
+        ]
+    ])
     
-    # Text handler for song search
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND, 
-        bot.text_handler
-    ))
+    await message.reply_animation(
+        Config.EFFECT_STICKER_ID,
+        caption="**🎨 Audio Effects Studio**\n\n"
+                "Choose an effect to apply:\n\n"
+                "⭐ = Premium Only\n\n"
+                "Your music will sound amazing!",
+        reply_markup=keyboard
+    )
+
+@Client.on_message(filters.command("premium") & filters.private)
+async def premium_command(client: Client, message: Message):
+    is_premium = await client.db.is_premium(message.from_user.id)
     
-    # Error handler
-    application.add_error_handler(bot.error_handler)
+    if is_premium:
+        expiry = await client.db.get_premium_expiry(message.from_user.id)
+        text = f"""
+**💎 Premium Status: ACTIVE**
+
+**Expires:** {expiry}
+**Features Unlocked:**
+✅ HD Audio (320kbps)
+✅ Unlimited Downloads
+✅ Priority Queue
+✅ All Effects
+✅ Custom Stickers
+✅ Ad-Free Experience
+        """
+    else:
+        text = """
+**💎 Premium Status: FREE**
+
+**Upgrade to Premium:**
+• HD Audio Quality
+• Unlimited Downloads
+• Priority Support
+• All Effects Unlocked
+• Custom Stickers
+
+**Price:** Contact @admin
+
+**Redeem Code:** `/redeem YOUR_CODE`
+        """
     
-    # Start bot with webhook for Render deployment
-    PORT = int(os.environ.get('PORT', 8443))
-    APP_URL = os.environ.get('APP_URL', '')
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎁 Redeem Code", callback_data="redeem_code"),
+            InlineKeyboardButton("💳 Get Premium", url="https://t.me/admin")
+        ],
+        [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
+    ])
     
-    if APP_URL:
-        # Webhook mode (for deployment)
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=BOT_TOKEN,
-            webhook_url=f"{APP_URL}/{BOT_TOKEN}"
+    await message.reply_animation(
+        Config.PREMIUM_EFFECT_ID,
+        caption=text,
+        reply_markup=keyboard
+    )
+
+@Client.on_message(filters.command("redeem") & filters.private)
+async def redeem_command(client: Client, message: Message):
+    if len(message.command) < 2:
+        await message.reply("⚠️ Please provide a premium code!\n"
+                           "Usage: `/redeem PREMIUM2024`")
+        return
+    
+    code = message.command[1].upper()
+    user_id = message.from_user.id
+    
+    success = await client.db.redeem_premium_code(user_id, code)
+    
+    if success:
+        await message.reply_animation(
+            Config.PREMIUM_STICKER_ID,
+            caption="🎉 **Congratulations!**\n\n"
+                   "You've unlocked premium for 30 days!\n\n"
+                   "Enjoy all premium features! ✨"
         )
     else:
-        # Polling mode (for development)
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        await message.reply("❌ Invalid or already used code!")
 
-if __name__ == '__main__':
-    main()
+@Client.on_message(filters.command("sticker") & filters.private)
+async def sticker_command(client: Client, message: Message):
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎵 Music Stickers", callback_data="sticker_music"),
+            InlineKeyboardButton("✨ Premium", callback_data="sticker_premium")
+        ],
+        [
+            InlineKeyboardButton("🎨 Create Custom", callback_data="sticker_create"),
+            InlineKeyboardButton("📦 Get Pack", url="https://t.me/addstickers/your_pack")
+        ],
+        [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
+    ])
+    
+    await message.reply_animation(
+        Config.STAR_EFFECT_ID,
+        caption="**🎨 Custom Sticker System**\n\n"
+                "Choose sticker type:\n"
+                "• Music themed stickers\n"
+                "• Premium exclusive stickers\n"
+                "• Custom sticker creator\n"
+                "• Get sticker pack",
+        reply_markup=keyboard
+    )
+
+@Client.on_message(filters.command("stats") & filters.private)
+async def stats_command(client: Client, message: Message):
+    user_id = message.from_user.id
+    stats = await client.db.get_user_stats(user_id)
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Refresh", callback_data="refresh_stats"),
+         InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
+    ])
+    
+    await message.reply_animation(
+        Config.STAR_EFFECT_ID,
+        caption=f"""
+**📊 Your Statistics**
+
+**Total Streams:** {stats.get('total_streams', 0)}
+**Premium:** {'✅ Active' if stats.get('is_premium') else '❌ Inactive'}
+**Member Since:** {stats.get('created_at', 'N/A')}
+
+**Top Songs:**
+{stats.get('top_songs', 'No data yet')}
+
+**Keep using the bot to build your stats!**
+        """,
+        reply_markup=keyboard
+    )
+
+@Client.on_message(filters.command("help") & filters.private)
+async def help_command(client: Client, message: Message):
+    commands_text = """
+**📚 Available Commands:**
+
+**Music:**
+• `/play [song]` - Play a song
+• `/search [song]` - Search music
+• `/lyrics [song]` - Get lyrics
+• `/queue` - View queue
+• `/skip` - Skip current
+• `/stop` - Stop playing
+
+**Effects:**
+• `/effects` - Show effects menu
+• `/effect [name]` - Apply effect
+• `/premium_effects` - Premium effects
+
+**Stickers:**
+• `/sticker` - Sticker menu
+• `/createsticker` - Create custom
+• `/stickers [pack]` - Get sticker pack
+
+**Premium:**
+• `/premium` - Premium info
+• `/redeem [code]` - Redeem code
+• `/premium_features` - Features list
+
+**Other:**
+• `/stats` - Your statistics
+• `/settings` - Bot settings
+• `/report` - Report issue
+• `/about` - About bot
+
+**Premium users get exclusive commands!**
+    """
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💎 Get Premium", url="https://t.me/admin"),
+         InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
+    ])
+    
+    await message.reply(commands_text, reply_markup=keyboard)
+
+# Callback handlers
+@Client.on_callback_query()
+async def callback_handler(client: Client, callback: CallbackQuery):
+    data = callback.data
+    user_id = callback.from_user.id
+    
+    if data == "main_menu":
+        await start_command(client, callback.message)
+        await callback.message.delete()
+    
+    elif data == "menu_music":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔍 Search", callback_data="search_song"),
+             InlineKeyboardButton("🎵 Queue", callback_data="view_queue")],
+            [InlineKeyboardButton("📝 Lyrics", callback_data="get_lyrics"),
+             InlineKeyboardButton("⏯️ Controls", callback_data="player_controls")],
+            [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
+        ])
+        await callback.message.edit_text(
+            "**🎵 Music Menu**\nSelect an option:",
+            reply_markup=keyboard
+        )
+    
+    elif data == "menu_effects":
+        await effects_command(client, callback.message)
+        await callback.message.delete()
+    
+    elif data == "menu_premium":
+        await premium_command(client, callback.message)
+        await callback.message.delete()
+    
+    elif data == "menu_stickers":
+        await sticker_command(client, callback.message)
+        await callback.message.delete()
+    
+    elif data == "menu_stats":
+        await stats_command(client, callback.message)
+        await callback.message.delete()
+    
+    elif data == "menu_help":
+        await help_command(client, callback.message)
+        await callback.message.delete()
+    
+    elif data.startswith("effect_"):
+        effect_name = data.replace("effect_", "")
+        is_premium = await client.db.is_premium(user_id)
+        
+        if not is_premium and effect_name in ['nightcore', 'reverb']:
+            await callback.answer("⭐ Premium feature! Upgrade to use.", show_alert=True)
+            return
+        
+        await callback.message.reply_animation(
+            Config.MUSIC_EFFECT_ID,
+            caption=f"🎵 Applying **{effect_name.upper()}** effect..."
+        )
+        await callback.answer(f"{effect_name} effect applied!")
+    
+    elif data == "redeem_code":
+        await callback.message.edit_text(
+            "🎁 **Redeem Premium Code**\n\n"
+            "Send your code using:\n"
+            "`/redeem YOUR_CODE`",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="menu_premium")]
+            ])
+        )
+    
+    await callback.answer()
+
+if __name__ == "__main__":
+    app = MusicBot()
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Bot crashed: {e}")
